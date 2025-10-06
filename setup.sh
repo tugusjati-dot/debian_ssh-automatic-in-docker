@@ -4,7 +4,7 @@
 # chmod +x setup.sh
 # to run use ./setup.sh
 
-# --- Konfigurasi ---
+
 DOCKER_DIR="$HOME/docker-ssh"
 DOCKERFILE_PATH="$DOCKER_DIR/Dockerfile"
 IMAGE_NAME="debian-ssh:bookworm"
@@ -13,7 +13,7 @@ HOST_SSH_PORT="2222" # Port exposed on the host machine
 USER_NAME="user1"
 USER_PASS="1234" # !! PERINGATAN: GANTI INI DENGAN PASSWORD AMAN ANDA !!
 NGROK_TOKEN="TOKEN_KAMU" # !! PERINGATAN: GANTI INI DENGAN TOKEN NGROK ASLI ANDA !!
-# ---------------------
+
 
 echo "--- SSH/Ngrok Docker Automation Script ---"
 
@@ -44,6 +44,7 @@ fi
 
 
 if [ "$BUILD_NEW_IMAGE" = true ]; then
+    
     cat <<EOF > "$DOCKERFILE_PATH"
 # Dockerfile: Debian 12 + openssh-server + single root user (user1)
 FROM debian:12
@@ -65,11 +66,13 @@ RUN useradd -m -s /bin/bash "\$USER" && \
     echo "\$USER:\$PASS" | chpasswd && \
     usermod -aG sudo "\$USER"
 
-# Configure sshd: Disable root login, enable password auth
-RUN sed -i 's/^#PermitRootLogin prohibit-password/PermitRootLogin no/' /etc/ssh/sshd_config && \
-    sed -i 's/^#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config && \
-    echo "PermitRootLogin no" >> /etc/ssh/sshd_config && \
-    echo "PasswordAuthentication yes" >> /etc/ssh/sshd_config
+# Configure SSHD sesuai permintaan: PermitRootLogin yes
+RUN sed -i 's/^#Port 22/Port 22/' /etc/ssh/sshd_config && \
+    echo "Port 22" >> /etc/ssh/sshd_config && \
+    echo "PermitRootLogin yes" >> /etc/ssh/sshd_config && \
+    echo "PasswordAuthentication yes" >> /etc/ssh/sshd_config && \
+    echo "PermitEmptyPasswords no" >> /etc/ssh/sshd_config && \
+    echo "UsePAM yes" >> /etc/ssh/sshd_config
 
 # generate host keys
 RUN ssh-keygen -A
@@ -97,6 +100,7 @@ EOF
 fi
 
 
+
 echo "Membuat dan menjalankan kontainer baru..."
 docker run -d --name "$CONTAINER_NAME" -p "$HOST_SSH_PORT":22 "$IMAGE_NAME"
 if [ $? -ne 0 ]; then
@@ -108,13 +112,13 @@ fi
 
 SETUP_MARKER_CMD="test -f /etc/.setup_complete"
 
-n
+
 if docker exec "$CONTAINER_NAME" $SETUP_MARKER_CMD; then
     echo "✅ Setup Ngrok/SSH/UFW di dalam kontainer sudah selesai. Melewati instalasi."
 else
     echo "Melakukan setup Ngrok/SSH/UFW di dalam kontainer..."
 
-
+    
     docker exec -u root "$CONTAINER_NAME" /bin/bash -c "
         echo 'Mengeksekusi setup awal di dalam kontainer...'
 
@@ -163,6 +167,7 @@ echo "Memulai Ngrok Tunnel TCP di port $NGROK_PORT..."
 echo "Catatan: Ngrok akan berjalan interaktif, dan Anda akan melihat alamat tunnel di layar, seperti menjalankan manual."
 echo "Untuk menghentikan Ngrok, tekan Ctrl+C."
 echo ""
+
 
 
 docker exec -it -u "$USER_NAME" "$CONTAINER_NAME" /usr/local/bin/ngrok tcp "$NGROK_PORT"
