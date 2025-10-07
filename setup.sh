@@ -28,24 +28,45 @@ mkdir -p "$DOCKER_DIR"
 cd "$DOCKER_DIR" || exit
 
 
-BUILD_NEW_IMAGE=false
-if ! docker images -q "$IMAGE_NAME" | grep -q .; then
-    echo "Image Docker tidak ditemukan. Akan membuat Dockerfile dan Image baru..."
-    BUILD_NEW_IMAGE=true
-else
-    
-    if docker ps -a --format '{{.Names}}' | grep -q "$CONTAINER_NAME"; then
-        echo "Kontainer lama '$CONTAINER_NAME' ditemukan. Menghentikan dan menghapus..."
-        docker stop "$CONTAINER_NAME" 2>/dev/null || true
-        docker rm "$CONTAINER_NAME" 2>/dev/null || true
+
+
+CONTAINER_STATUS=$(docker inspect -f '{{.State.Status}}' "$CONTAINER_NAME" 2>/dev/null)
+
+if [ "$CONTAINER_STATUS" == "running" ]; then
+    echo "✅ Kontainer '$CONTAINER_NAME' sudah berjalan. Melewati proses pembuatan/setup dan langsung ke Ngrok."
+
+    CONTAINER_READY=true
+elif [ "$CONTAINER_STATUS" == "exited" ]; then
+    echo "⚠️ Kontainer '$CONTAINER_NAME' ditemukan (status terhenti). Menjalankan kembali..."
+    docker start "$CONTAINER_NAME"
+    if [ $? -ne 0 ]; then
+        echo "❌ Gagal menjalankan kembali kontainer."
+        exit 1
     fi
-    echo "Image Docker '$IMAGE_NAME' ditemukan. Melewati proses build, tetapi kontainer akan dibuat baru."
+    echo "✅ Kontainer dijalankan kembali. Melewati proses pembuatan/setup dan langsung ke Ngrok."
+    CONTAINER_READY=true
+else
+
+    echo "Kontainer '$CONTAINER_NAME' tidak ditemukan. Memulai proses pembuatan baru..."
+    CONTAINER_READY=false
 fi
 
 
-if [ "$BUILD_NEW_IMAGE" = true ]; then
+
+
+
+if [ "$CONTAINER_READY" = false ]; then
+    BUILD_NEW_IMAGE=false
+    if ! docker images -q "$IMAGE_NAME" | grep -q .; then
+        echo "Image Docker tidak ditemukan. Akan membuat Dockerfile dan Image baru..."
+        BUILD_NEW_IMAGE=true
+    else
+        echo "Image Docker '$IMAGE_NAME' ditemukan. Melewati proses build."
+    fi
+
+    if [ "$BUILD_NEW_IMAGE" = true ]; then
     
-    cat <<EOF > "$DOCKERFILE_PATH"
+        cat <<EOF > "$DOCKERFILE_PATH"
 # Dockerfile: Debian 12 + openssh-server + single root user (user1)
 FROM debian:12
 
@@ -86,68 +107,62 @@ RUN touch /etc/.initial_setup_needed
 CMD ["/usr/sbin/sshd","-D"]
 EOF
 
-   
-    echo "Membangun image '$IMAGE_NAME'..."
-    docker build -t "$IMAGE_NAME" .
+        echo "Membangun image '$IMAGE_NAME'..."
+        docker build -t "$IMAGE_NAME" .
+        if [ $? -ne 0 ]; then
+            echo "❌ Gagal membangun image Docker."
+            exit 1
+        fi
+    fi
+
+
+    echo "Membuat dan menjalankan kontainer baru..."
+    docker run -d --name "$CONTAINER_NAME" -p "$HOST_SSH_PORT":22 "$IMAGE_NAME"
     if [ $? -ne 0 ]; then
-        echo "❌ Gagal membangun image Docker."
+        echo "❌ Gagal menjalankan kontainer. Pastikan port $HOST_SSH_PORT tidak digunakan."
         exit 1
     fi
-    
-    
-    docker stop "$CONTAINER_NAME" 2>/dev/null || true
-    docker rm "$CONTAINER_NAME" 2>/dev/null || true
-fi
 
 
+    SETUP_MARKER_CMD="test -f /etc/.setup_complete"
 
-echo "Membuat dan menjalankan kontainer baru..."
-docker run -d --name "$CONTAINER_NAME" -p "$HOST_SSH_PORT":22 "$IMAGE_NAME"
-if [ $? -ne 0 ]; then
-    echo "❌ Gagal menjalankan kontainer. Pastikan port $HOST_SSH_PORT tidak digunakan."
-    exit 1
-fi
-
-
-
-SETUP_MARKER_CMD="test -f /etc/.setup_complete"
-
-
-if docker exec "$CONTAINER_NAME" $SETUP_MARKER_CMD; then
-    echo "✅ Setup Ngrok/SSH/UFW di dalam kontainer sudah selesai. Melewati instalasi."
-else
-    echo "Melakukan setup Ngrok/SSH/UFW di dalam kontainer..."
+    if docker exec "$CONTAINER_NAME" $SETUP_MARKER_CMD; then
+        echo "✅ Setup Ngrok/SSH/UFW di dalam kontainer sudah selesai. Melewati instalasi."
+    else
+        echo "Melakukan setup Ngrok/SSH/UFW di dalam kontainer..."
 
     
-    docker exec -u root "$CONTAINER_NAME" /bin/bash -c "
-        echo 'Mengeksekusi setup awal di dalam kontainer...'
+        docker exec -u root "$CONTAINER_NAME" /bin/bash -c "
+            echo 'Mengeksekusi setup awal di dalam kontainer...'
 
-        # 1. Download dan install Ngrok
-        cd /tmp
-        wget -q https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz -O ngrok.tgz
-        tar -xvzf ngrok.tgz
-        mv ngrok /usr/local/bin/
-        
-        # 2. Konfigurasi Ngrok Auth Token sebagai user1 (Fix Ngrok 4018)
-        # Menjalankan perintah ini sebagai user1 memastikan token disimpan di /home/user1/.config/ngrok/ngrok.yml
-        su - "$USER_NAME" -c \"/usr/local/bin/ngrok config add-authtoken $NGROK_TOKEN\"
-        
-        # 3. UFW setup (Diabaikan jika gagal, karena Docker sudah mengurus networking)
-        # Output error UFW disembunyikan karena wajar terjadi di lingkungan Docker minimal
-        echo 'Mengkonfigurasi UFW (Output error diabaikan)...'
-        ufw --force enable 2>/dev/null || true
-        ufw allow 22 2>/dev/null || true
-        ufw allow $HOST_SSH_PORT/tcp 2>/dev/null || true
+            # 1. Download dan install Ngrok
+            cd /tmp
+            wget -q https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz -O ngrok.tgz
+            tar -xvzf ngrok.tgz
+            mv ngrok /usr/local/bin/
+            
+            # 2. Konfigurasi Ngrok Auth Token sebagai user1 (Fix Ngrok 4018)
+            # Menjalankan perintah ini sebagai user1 memastikan token disimpan di /home/user1/.config/ngrok/ngrok.yml
+            su - "$USER_NAME" -c \"/usr/local/bin/ngrok config add-authtoken $NGROK_TOKEN\"
+            
+            # 3. UFW setup (Diabaikan jika gagal, karena Docker sudah mengurus networking)
+            # Output error UFW disembunyikan karena wajar terjadi di lingkungan Docker minimal
+            echo 'Mengkonfigurasi UFW (Output error diabaikan)...'
+            ufw --force enable 2>/dev/null || true
+            ufw allow 22 2>/dev/null || true
+            ufw allow $HOST_SSH_PORT/tcp 2>/dev/null || true
 
-        # 4. Buat penanda setup selesai
-        touch /etc/.setup_complete
-        echo 'Setup awal selesai.'
-    "
-    if [ $? -ne 0 ]; then
-        echo "❌ Gagal menjalankan setup awal di dalam kontainer. Harap periksa log kontainer (docker logs $CONTAINER_NAME)."
-        exit 1
+            # 4. Buat penanda setup selesai
+            touch /etc/.setup_complete
+            echo 'Setup awal selesai.'
+        "
+        if [ $? -ne 0 ]; then
+            echo "❌ Gagal menjalankan setup awal di dalam kontainer. Harap periksa log kontainer (docker logs $CONTAINER_NAME)."
+            exit 1
+        fi
     fi
 fi
+
 
 
 echo "--------------------------------------------------------"
@@ -168,12 +183,9 @@ echo "Catatan: Ngrok akan berjalan interaktif, dan Anda akan melihat alamat tunn
 echo "Untuk menghentikan Ngrok, tekan Ctrl+C."
 echo ""
 
-
-
 docker exec -it -u "$USER_NAME" "$CONTAINER_NAME" /usr/local/bin/ngrok tcp "$NGROK_PORT"
 
 echo "Ngrok tunnel dihentikan."
-
 
 echo "--------------------------------------------------------"
 echo "Kontainer Docker '$CONTAINER_NAME' masih berjalan di latar belakang."
